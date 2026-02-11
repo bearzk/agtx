@@ -139,6 +139,8 @@ color_description = "#E8909C"
 - **Worktrees**: `.agtx/worktrees/` in each project
 - **Tmux sessions**: Dedicated server `agtx` (view with `tmux -L agtx ls`)
 
+> **Important**: Add `.agtx/` to your project's `.gitignore` to avoid committing worktrees and local task data.
+
 ## Development
 
 See [CLAUDE.md](CLAUDE.md) for development documentation.
