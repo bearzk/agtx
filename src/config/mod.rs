@@ -48,6 +48,14 @@ pub struct ThemeConfig {
     /// Color for column headers when not selected (hex, e.g. "#AAAAAA")
     #[serde(default = "default_color_column_header")]
     pub color_column_header: String,
+
+    /// Color for popup borders (hex, e.g. "#00FF00")
+    #[serde(default = "default_color_popup_border")]
+    pub color_popup_border: String,
+
+    /// Background color for popup headers (hex, e.g. "#00FFFF")
+    #[serde(default = "default_color_popup_header")]
+    pub color_popup_header: String,
 }
 
 impl Default for ThemeConfig {
@@ -60,12 +68,14 @@ impl Default for ThemeConfig {
             color_accent: default_color_accent(),
             color_description: default_color_description(),
             color_column_header: default_color_column_header(),
+            color_popup_border: default_color_popup_border(),
+            color_popup_header: default_color_popup_header(),
         }
     }
 }
 
 fn default_color_selected() -> String {
-    "#ead49a".to_string() // Light yellow
+    "#ead49a".to_string() // Yellow
 }
 
 fn default_color_normal() -> String {
@@ -73,11 +83,11 @@ fn default_color_normal() -> String {
 }
 
 fn default_color_dimmed() -> String {
-    "#9C9991".to_string() // Dark gray
+    "#9C9991".to_string() // Dark Gray
 }
 
 fn default_color_text() -> String {
-    "#f2ece6".to_string() // Rose
+    "#f2ece6".to_string() // Light Rose
 }
 
 fn default_color_accent() -> String {
@@ -89,7 +99,15 @@ fn default_color_description() -> String {
 }
 
 fn default_color_column_header() -> String {
-    "#a0d2fa".to_string() // Light gray
+    "#a0d2fa".to_string() // Light Blue Gray
+}
+
+fn default_color_popup_border() -> String {
+    "#9ffcf8".to_string() // Light Cyan
+}
+
+fn default_color_popup_header() -> String {
+    "#69fae7".to_string() // Light Cyan
 }
 
 impl ThemeConfig {

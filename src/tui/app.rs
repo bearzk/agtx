@@ -76,11 +76,20 @@ struct AppState {
     delete_confirm_popup: Option<DeleteConfirmPopup>,
 }
 
-/// State for confirming move to Done when PR is still open
+/// State for confirming move to Done
 #[derive(Debug, Clone)]
 struct DoneConfirmPopup {
     task_id: String,
     pr_number: i32,
+    pr_state: DoneConfirmPrState,
+}
+
+#[derive(Debug, Clone)]
+enum DoneConfirmPrState {
+    Open,
+    Merged,
+    Closed,
+    Unknown,
 }
 
 /// State for PR creation status popup (loading/success/error)
@@ -590,12 +599,19 @@ impl App {
 
         // Shell popup overlay
         if let Some(popup) = &state.shell_popup {
-            let popup_area = centered_rect_fixed_width(80, 75, area);
+            let popup_area = centered_rect_fixed_width(82, 75, area); // +2 for border
             frame.render_widget(Clear, popup_area);
 
+            // Draw border around the popup
+            let border_block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(hex_to_color(&state.config.theme.color_popup_border)));
+            let inner_area = border_block.inner(popup_area);
+            frame.render_widget(border_block, popup_area);
+
             // Resize tmux pane to match popup dimensions for proper display
-            let pane_width = popup_area.width.saturating_sub(2);
-            let pane_height = popup_area.height.saturating_sub(4);
+            let pane_width = inner_area.width;
+            let pane_height = inner_area.height.saturating_sub(2); // -2 for title and footer
             let _ = std::process::Command::new("tmux")
                 .args(["-L", tmux::AGENT_SERVER])
                 .args(["resize-pane", "-t", &popup.window_name])
@@ -606,7 +622,7 @@ impl App {
             // Capture tmux pane content with more history
             let pane_content = capture_tmux_pane_with_history(&popup.window_name, 500);
 
-            // Layout: header, content, footer
+            // Layout: header, content, footer (inside the border)
             let popup_chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
@@ -614,17 +630,17 @@ impl App {
                     Constraint::Min(0),    // Shell content
                     Constraint::Length(1), // Footer
                 ])
-                .split(popup_area);
+                .split(inner_area);
 
             // Title bar
             let title = format!(" {} ", popup.task_title);
             let title_bar = Paragraph::new(title)
-                .style(Style::default().fg(Color::Black).bg(Color::Cyan));
+                .style(Style::default().fg(Color::Black).bg(hex_to_color(&state.config.theme.color_popup_header)));
             frame.render_widget(title_bar, popup_chunks[0]);
 
             // Shell content - parse ANSI escape sequences for colors
             let styled_lines = parse_ansi_to_lines(&pane_content);
-            let visible_height = popup_chunks[1].height.saturating_sub(2) as usize;
+            let visible_height = popup_chunks[1].height as usize;
 
             // Filter out trailing empty lines to find actual content
             let non_empty_count = styled_lines.iter()
@@ -657,9 +673,9 @@ impl App {
 
             // Footer with scroll indicator
             let scroll_indicator = if popup.scroll_offset < 0 {
-                format!(" [Ctrl+j/k] scroll [Ctrl+g] bottom [Ctrl+q] close | Line {} ", start_line + 1)
+                format!(" [Ctrl+j/k] scroll [Ctrl+d/u] page [Ctrl+g] bottom [Ctrl+q] close | Line {} ", start_line + 1)
             } else {
-                " [Ctrl+j/k] scroll [Ctrl+q] close | At bottom ".to_string()
+                " [Ctrl+j/k] scroll [Ctrl+d/u] page [Ctrl+q] close | At bottom ".to_string()
             };
             let footer = Paragraph::new(scroll_indicator)
                 .style(Style::default().fg(Color::Black).bg(hex_to_color(&state.config.theme.color_dimmed)));
@@ -773,7 +789,7 @@ impl App {
                 let main_block = Block::default()
                     .title(" Create Pull Request ")
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Green));
+                    .border_style(Style::default().fg(hex_to_color(&state.config.theme.color_popup_border)));
                 frame.render_widget(main_block, popup_area);
 
                 // Title input
@@ -887,7 +903,7 @@ impl App {
             }
         }
 
-        // Done confirmation popup (when PR is still open)
+        // Done confirmation popup
         if let Some(ref popup) = state.done_confirm_popup {
             let popup_area = centered_rect(50, 25, area);
             frame.render_widget(Clear, popup_area);
@@ -899,10 +915,24 @@ impl App {
             frame.render_widget(main_block, popup_area);
 
             let inner = popup_area.inner(ratatui::layout::Margin { horizontal: 2, vertical: 2 });
-            let text = format!(
-                "PR #{} is still open.\n\nAre you sure you want to move this task to Done?\n\nThis will clean up the worktree and branch.\n\n[y] Yes, move to Done    [n/Esc] Cancel",
-                popup.pr_number
-            );
+            let text = match popup.pr_state {
+                DoneConfirmPrState::Open => format!(
+                    "PR #{} is still open.\n\nAre you sure you want to move this task to Done?\n\nWorktree will be deleted, tmux coding session killed.\nBranch kept locally.\n\n[y] Yes, move to Done    [n/Esc] Cancel",
+                    popup.pr_number
+                ),
+                DoneConfirmPrState::Merged => format!(
+                    "PR #{} was merged.\n\nWorktree will be deleted, tmux coding session killed.\nBranch kept locally.\n\n[y] Yes, move to Done    [n/Esc] Cancel",
+                    popup.pr_number
+                ),
+                DoneConfirmPrState::Closed => format!(
+                    "PR #{} was closed.\n\nWorktree will be deleted, tmux coding session killed.\nBranch kept locally.\n\n[y] Yes, move to Done    [n/Esc] Cancel",
+                    popup.pr_number
+                ),
+                DoneConfirmPrState::Unknown => format!(
+                    "PR #{} state unknown.\n\nAre you sure you want to move this task to Done?\n\nWorktree will be deleted, tmux coding session killed.\nBranch kept locally.\n\n[y] Yes, move to Done    [n/Esc] Cancel",
+                    popup.pr_number
+                ),
+            };
             let content = Paragraph::new(text)
                 .style(Style::default().fg(Color::White))
                 .alignment(ratatui::layout::Alignment::Center)
@@ -950,7 +980,7 @@ impl App {
             // Title bar
             let title = format!(" Diff: {} ", popup.task_title);
             let title_bar = Paragraph::new(title)
-                .style(Style::default().fg(Color::Black).bg(Color::Cyan));
+                .style(Style::default().fg(Color::Black).bg(hex_to_color(&state.config.theme.color_popup_header)));
             frame.render_widget(title_bar, popup_chunks[0]);
 
             // Diff content with syntax highlighting
@@ -978,7 +1008,7 @@ impl App {
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .border_style(Style::default().fg(Color::Cyan)),
+                        .border_style(Style::default().fg(hex_to_color(&state.config.theme.color_popup_border))),
                 );
             frame.render_widget(diff_content, popup_chunks[1]);
 
@@ -1357,14 +1387,7 @@ impl App {
     fn create_pr_and_move_to_review_with_content(&mut self, task_id: &str, pr_title: &str, pr_body: &str) -> Result<()> {
         if let (Some(db), Some(project_path)) = (&self.state.db, self.state.project_path.clone()) {
             if let Some(mut task) = db.get_task(task_id)? {
-                // Kill tmux window first
-                if let Some(session_name) = &task.session_name {
-                    let _ = std::process::Command::new("tmux")
-                        .args(["-L", tmux::AGENT_SERVER])
-                        .args(["kill-window", "-t", session_name])
-                        .output();
-                }
-                task.session_name = None;
+                // Keep tmux window open - session_name stays set for resume
 
                 // Show loading popup
                 self.state.pr_status_popup = Some(PrStatusPopup {
@@ -1389,11 +1412,11 @@ impl App {
                     match result {
                         Ok((pr_number, pr_url)) => {
                             // Update task in database from background thread
+                            // Keep session_name so popup can still be opened in Review
                             if let Ok(db) = crate::db::Database::open_project(&project_path_clone) {
                                 let mut updated_task = task_clone;
                                 updated_task.pr_number = Some(pr_number);
                                 updated_task.pr_url = Some(pr_url.clone());
-                                updated_task.session_name = None;
                                 updated_task.status = TaskStatus::Review;
                                 updated_task.updated_at = chrono::Utc::now();
                                 let _ = db.update_task(&updated_task);
@@ -1556,8 +1579,16 @@ impl App {
                 KeyCode::Char('j') | KeyCode::Char('n') | KeyCode::Down if has_ctrl => {
                     popup.scroll_offset = (popup.scroll_offset + 5).min(0);
                 }
+                // Page up with Ctrl+u or PageUp
+                KeyCode::Char('u') if has_ctrl => {
+                    popup.scroll_offset -= 20;
+                }
                 KeyCode::PageUp => {
                     popup.scroll_offset -= 20;
+                }
+                // Page down with Ctrl+d or PageDown
+                KeyCode::Char('d') if has_ctrl => {
+                    popup.scroll_offset = (popup.scroll_offset + 20).min(0);
                 }
                 KeyCode::PageDown => {
                     popup.scroll_offset = (popup.scroll_offset + 20).min(0);
@@ -2101,6 +2132,9 @@ impl App {
                 // Create tmux window and start Claude Code
                 let claude_cmd = format!("claude --dangerously-skip-permissions '{}'", escaped_prompt);
 
+                // Ensure project tmux session exists
+                ensure_project_tmux_session(&self.state.project_name, &project_path);
+
                 std::process::Command::new("tmux")
                     .args(["-L", tmux::AGENT_SERVER])
                     .args(["new-window", "-d", "-t", &self.state.project_name, "-n", &window_name])
@@ -2211,9 +2245,9 @@ impl App {
                         match result {
                             Ok(pr_url) => {
                                 // Update task in database
+                                // Keep session_name so popup can still be opened in Review
                                 if let Ok(db) = crate::db::Database::open_project(&project_path_clone) {
                                     let mut updated_task = task_clone;
-                                    updated_task.session_name = None;
                                     updated_task.status = TaskStatus::Review;
                                     updated_task.updated_at = chrono::Utc::now();
                                     let _ = db.update_task(&updated_task);
@@ -2226,13 +2260,7 @@ impl App {
                         }
                     });
 
-                    // Kill tmux window
-                    if let Some(session_name) = &task.session_name {
-                        let _ = std::process::Command::new("tmux")
-                            .args(["-L", tmux::AGENT_SERVER])
-                            .args(["kill-window", "-t", session_name])
-                            .output();
-                    }
+                    // Keep tmux window open - session_name stays set for resume
 
                     return Ok(());
                 }
@@ -2270,73 +2298,42 @@ impl App {
                 return Ok(());
             }
 
-            // When moving from Review to Done: Check PR state
+            // When moving from Review to Done: Show confirmation with PR state
             if current_status == TaskStatus::Review && new_status == TaskStatus::Done {
                 if let Some(pr_number) = task.pr_number {
                     let pr_state = get_pr_state(pr_number, &project_path)?;
 
-                    match pr_state {
-                        PrState::Merged | PrState::Closed => {
-                            // PR is merged or closed - proceed with cleanup
-                        }
-                        PrState::Open => {
-                            // PR still open - ask for confirmation
-                            self.state.done_confirm_popup = Some(DoneConfirmPopup {
-                                task_id: task.id.clone(),
-                                pr_number,
-                            });
-                            return Ok(());
-                        }
-                        PrState::Unknown => {
-                            // Can't determine state - ask for confirmation
-                            self.state.done_confirm_popup = Some(DoneConfirmPopup {
-                                task_id: task.id.clone(),
-                                pr_number,
-                            });
-                            return Ok(());
-                        }
-                    }
+                    let confirm_state = match pr_state {
+                        PrState::Merged => DoneConfirmPrState::Merged,
+                        PrState::Closed => DoneConfirmPrState::Closed,
+                        PrState::Open => DoneConfirmPrState::Open,
+                        PrState::Unknown => DoneConfirmPrState::Unknown,
+                    };
 
-                    // Cleanup resources
-                    // Kill tmux window if exists
-                    if let Some(session_name) = &task.session_name {
-                        let _ = std::process::Command::new("tmux")
-                            .args(["-L", tmux::AGENT_SERVER])
-                            .args(["kill-window", "-t", session_name])
-                            .output();
-                    }
-
-                    // Remove worktree if exists
-                    if let Some(worktree) = &task.worktree_path {
-                        let _ = std::process::Command::new("git")
-                            .current_dir(&project_path)
-                            .args(["worktree", "remove", "--force", worktree])
-                            .output();
-                    }
-
-                    // Keep the branch so task can be reopened later
-
-                    task.session_name = None;
-                    task.worktree_path = None;
-                } else {
-                    // No PR - allow moving to Done (task might have been abandoned early)
-                    // Cleanup any resources that might exist
-                    if let Some(session_name) = &task.session_name {
-                        let _ = std::process::Command::new("tmux")
-                            .args(["-L", tmux::AGENT_SERVER])
-                            .args(["kill-window", "-t", session_name])
-                            .output();
-                    }
-                    if let Some(worktree) = &task.worktree_path {
-                        let _ = std::process::Command::new("git")
-                            .current_dir(&project_path)
-                            .args(["worktree", "remove", "--force", worktree])
-                            .output();
-                    }
-                    // Keep the branch so task can be reopened later
-                    task.session_name = None;
-                    task.worktree_path = None;
+                    self.state.done_confirm_popup = Some(DoneConfirmPopup {
+                        task_id: task.id.clone(),
+                        pr_number,
+                        pr_state: confirm_state,
+                    });
+                    return Ok(());
                 }
+                // No PR - allow moving to Done directly (task might have been abandoned early)
+                // Cleanup any resources that might exist
+                if let Some(session_name) = &task.session_name {
+                    let _ = std::process::Command::new("tmux")
+                        .args(["-L", tmux::AGENT_SERVER])
+                        .args(["kill-window", "-t", session_name])
+                        .output();
+                }
+                if let Some(worktree) = &task.worktree_path {
+                    let _ = std::process::Command::new("git")
+                        .current_dir(&project_path)
+                        .args(["worktree", "remove", "--force", worktree])
+                        .output();
+                }
+                // Keep the branch so task can be reopened later
+                task.session_name = None;
+                task.worktree_path = None;
             }
 
             task.status = new_status;
@@ -2351,78 +2348,15 @@ impl App {
     }
 
     /// Move task from Review back to Running (only allowed transition backwards)
+    /// The tmux window should still be open from when it was in Running state
     fn move_review_to_running(&mut self, task_id: &str) -> Result<()> {
-        if let (Some(db), Some(project_path)) = (&self.state.db, &self.state.project_path) {
+        if let (Some(db), Some(_project_path)) = (&self.state.db, &self.state.project_path) {
             if let Some(mut task) = db.get_task(task_id)? {
                 if task.status != TaskStatus::Review {
                     return Ok(());
                 }
 
-                // Re-spawn tmux window in existing worktree, resuming previous Claude session
-                if let (Some(worktree_path), Some(_branch_name)) = (&task.worktree_path, &task.branch_name) {
-                    let title_slug: String = task.title
-                        .chars()
-                        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
-                        .take(30)
-                        .collect();
-                    let title_slug = title_slug.trim_matches('-').to_string();
-                    let window_name = format!("task-{}", title_slug);
-                    let target = format!("{}:{}", self.state.project_name, window_name);
-
-                    // Build prompt with PR feedback context
-                    let prompt = format!(
-                        "Continue working on: {}\n\nPR #{} needs changes. Please address the feedback.",
-                        task.title,
-                        task.pr_number.unwrap_or(0)
-                    );
-                    let escaped_prompt = prompt.replace('\'', "'\"'\"'");
-
-                    // Resume previous Claude session using task ID, with new prompt
-                    let claude_cmd = format!(
-                        "claude --resume '{}' --dangerously-skip-permissions '{}'",
-                        task.id,
-                        escaped_prompt
-                    );
-
-                    std::process::Command::new("tmux")
-                        .args(["-L", tmux::AGENT_SERVER])
-                        .args(["new-window", "-d", "-t", &self.state.project_name, "-n", &window_name])
-                        .args(["-c", worktree_path])
-                        .args(["sh", "-c", &claude_cmd])
-                        .output()?;
-
-                    // Wait for Claude to show the bypass warning prompt, then accept it
-                    let target_clone = target.clone();
-                    std::thread::spawn(move || {
-                        for _ in 0..50 {
-                            std::thread::sleep(std::time::Duration::from_millis(100));
-
-                            let output = std::process::Command::new("tmux")
-                                .args(["-L", crate::tmux::AGENT_SERVER])
-                                .args(["capture-pane", "-t", &target_clone, "-p"])
-                                .output();
-
-                            if let Ok(output) = output {
-                                let content = String::from_utf8_lossy(&output.stdout);
-                                if content.contains("Yes, I accept") || content.contains("I accept the risk") {
-                                    let _ = std::process::Command::new("tmux")
-                                        .args(["-L", crate::tmux::AGENT_SERVER])
-                                        .args(["send-keys", "-t", &target_clone, "2"])
-                                        .output();
-                                    std::thread::sleep(std::time::Duration::from_millis(50));
-                                    let _ = std::process::Command::new("tmux")
-                                        .args(["-L", crate::tmux::AGENT_SERVER])
-                                        .args(["send-keys", "-t", &target_clone, "Enter"])
-                                        .output();
-                                    break;
-                                }
-                            }
-                        }
-                    });
-
-                    task.session_name = Some(target);
-                }
-
+                // Just move the task back to Running - the tmux window should still be open
                 task.status = TaskStatus::Running;
                 task.updated_at = chrono::Utc::now();
                 db.update_task(&task)?;
