@@ -75,6 +75,8 @@ struct AppState {
     done_confirm_popup: Option<DoneConfirmPopup>,
     // Confirmation popup for deleting a task
     delete_confirm_popup: Option<DeleteConfirmPopup>,
+    // Confirmation popup for asking if user wants to create PR when moving to Review
+    review_confirm_popup: Option<ReviewConfirmPopup>,
 }
 
 /// State for confirming move to Done
@@ -104,6 +106,7 @@ struct PrStatusPopup {
 #[derive(Debug, Clone, PartialEq)]
 enum PrCreationStatus {
     Creating,
+    Pushing, // Pushing to existing PR
     Success,
     Error,
 }
@@ -161,6 +164,13 @@ struct FileSearchState {
 /// State for delete confirmation popup
 #[derive(Debug, Clone)]
 struct DeleteConfirmPopup {
+    task_id: String,
+    task_title: String,
+}
+
+/// State for asking if user wants to create PR when moving to Review
+#[derive(Debug, Clone)]
+struct ReviewConfirmPopup {
     task_id: String,
     task_title: String,
 }
@@ -245,6 +255,7 @@ impl App {
                 pr_creation_rx: None,
                 done_confirm_popup: None,
                 delete_confirm_popup: None,
+                review_confirm_popup: None,
             },
         };
 
@@ -858,6 +869,7 @@ impl App {
 
             let (title, border_color) = match popup.status {
                 PrCreationStatus::Creating => (" Creating Pull Request ", hex_to_color(&state.config.theme.color_selected)),
+                PrCreationStatus::Pushing => (" Pushing Changes ", hex_to_color(&state.config.theme.color_selected)),
                 PrCreationStatus::Success => (" Pull Request Created ", Color::Green),
                 PrCreationStatus::Error => (" Error Creating PR ", Color::Red),
             };
@@ -880,6 +892,20 @@ impl App {
                     let spinner = spinner_chars[spinner_idx];
 
                     let text = format!("{} Pushing branch and creating PR...", spinner);
+                    let content = Paragraph::new(text)
+                        .style(Style::default().fg(Color::Cyan))
+                        .alignment(ratatui::layout::Alignment::Center);
+                    frame.render_widget(content, inner);
+                }
+                PrCreationStatus::Pushing => {
+                    let spinner_chars = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+                    let spinner_idx = (std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() / 100) as usize % spinner_chars.len();
+                    let spinner = spinner_chars[spinner_idx];
+
+                    let text = format!("{} PR exists. Pushing changes...", spinner);
                     let content = Paragraph::new(text)
                         .style(Style::default().fg(Color::Cyan))
                         .alignment(ratatui::layout::Alignment::Center);
@@ -961,6 +987,29 @@ impl App {
             let inner = popup_area.inner(ratatui::layout::Margin { horizontal: 2, vertical: 2 });
             let text = format!(
                 "Are you sure you want to delete:\n\n\"{}\"\n\nThis will also remove the worktree and tmux session.\n\n[y] Yes, delete    [n/Esc] Cancel",
+                popup.task_title
+            );
+            let content = Paragraph::new(text)
+                .style(Style::default().fg(Color::White))
+                .alignment(ratatui::layout::Alignment::Center)
+                .wrap(Wrap { trim: false });
+            frame.render_widget(content, inner);
+        }
+
+        // Review confirmation popup (ask if user wants to create PR)
+        if let Some(ref popup) = state.review_confirm_popup {
+            let popup_area = centered_rect(50, 25, area);
+            frame.render_widget(Clear, popup_area);
+
+            let main_block = Block::default()
+                .title(" Move to Review ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(hex_to_color(&state.config.theme.color_popup_border)));
+            frame.render_widget(main_block, popup_area);
+
+            let inner = popup_area.inner(ratatui::layout::Margin { horizontal: 2, vertical: 2 });
+            let text = format!(
+                "Moving task to Review:\n\n\"{}\"\n\nDo you want to create a Pull Request?\n\n[y] Yes, create PR    [n] No, just move    [Esc] Cancel",
                 popup.task_title
             );
             let content = Paragraph::new(text)
@@ -1223,8 +1272,8 @@ impl App {
     fn handle_key(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
         // Handle PR status popup if open (loading/success/error)
         if let Some(ref popup) = self.state.pr_status_popup {
-            // Only allow closing if not in Creating state
-            if popup.status != PrCreationStatus::Creating {
+            // Only allow closing if not in Creating/Pushing state
+            if popup.status != PrCreationStatus::Creating && popup.status != PrCreationStatus::Pushing {
                 if matches!(key.code, KeyCode::Enter | KeyCode::Esc) {
                     self.state.pr_status_popup = None;
                 }
@@ -1240,6 +1289,11 @@ impl App {
         // Handle Delete confirmation popup if open
         if self.state.delete_confirm_popup.is_some() {
             return self.handle_delete_confirm_key(key);
+        }
+
+        // Handle Review confirmation popup if open
+        if self.state.review_confirm_popup.is_some() {
+            return self.handle_review_confirm_key(key);
         }
 
         // Handle diff popup if open
@@ -1311,6 +1365,29 @@ impl App {
         Ok(())
     }
 
+    fn handle_review_confirm_key(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
+        if let Some(popup) = self.state.review_confirm_popup.clone() {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    // Yes - create PR and move to review
+                    self.state.review_confirm_popup = None;
+                    self.move_running_to_review_with_pr(&popup.task_id)?;
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') => {
+                    // No - just move to review without PR
+                    self.state.review_confirm_popup = None;
+                    self.move_running_to_review_without_pr(&popup.task_id)?;
+                }
+                KeyCode::Esc => {
+                    // Cancelled - don't move
+                    self.state.review_confirm_popup = None;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     fn force_move_to_done(&mut self, task_id: &str) -> Result<()> {
         if let (Some(db), Some(project_path)) = (&self.state.db, self.state.project_path.clone()) {
             if let Some(mut task) = db.get_task(task_id)? {
@@ -1332,6 +1409,52 @@ impl App {
                 task.session_name = None;
                 task.worktree_path = None;
                 task.status = TaskStatus::Done;
+                task.updated_at = chrono::Utc::now();
+                db.update_task(&task)?;
+                self.refresh_tasks()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn move_running_to_review_with_pr(&mut self, task_id: &str) -> Result<()> {
+        if let Some(db) = &self.state.db {
+            if let Some(task) = db.get_task(task_id)? {
+                let task_title = task.title.clone();
+                let worktree_path = task.worktree_path.clone();
+
+                // Show popup immediately with loading state
+                self.state.pr_confirm_popup = Some(PrConfirmPopup {
+                    task_id: task_id.to_string(),
+                    pr_title: task_title.clone(),
+                    pr_body: String::new(),
+                    editing_title: true,
+                    generating: true,
+                });
+
+                // Spawn background thread to generate PR description
+                let (tx, rx) = mpsc::channel();
+                self.state.pr_generation_rx = Some(rx);
+
+                let title_for_thread = task_title.clone();
+                let worktree_for_thread = worktree_path.clone();
+                std::thread::spawn(move || {
+                    let (pr_title, pr_body) = generate_pr_description(
+                        &title_for_thread,
+                        worktree_for_thread.as_deref(),
+                        None,
+                    );
+                    let _ = tx.send((pr_title, pr_body));
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn move_running_to_review_without_pr(&mut self, task_id: &str) -> Result<()> {
+        if let Some(db) = &self.state.db {
+            if let Some(mut task) = db.get_task(task_id)? {
+                task.status = TaskStatus::Review;
                 task.updated_at = chrono::Utc::now();
                 db.update_task(&task)?;
                 self.refresh_tasks()?;
@@ -2294,13 +2417,13 @@ impl App {
                 }
             }
 
-            // When moving from Running to Review: Either create PR or just push if PR exists
+            // When moving from Running to Review: Ask if user wants to create PR
             if current_status == TaskStatus::Running && new_status == TaskStatus::Review {
                 // Check if PR already exists (task was resumed from Review)
                 if task.pr_number.is_some() {
                     // PR already exists - just commit and push the new changes
                     self.state.pr_status_popup = Some(PrStatusPopup {
-                        status: PrCreationStatus::Creating,
+                        status: PrCreationStatus::Pushing,
                         pr_url: None,
                         error_message: None,
                     });
@@ -2336,36 +2459,11 @@ impl App {
                     return Ok(());
                 }
 
-                // No PR yet - show PR creation popup
-                let task_id = task.id.clone();
-                let task_title = task.title.clone();
-                let worktree_path = task.worktree_path.clone();
-
-                // Show popup immediately with loading state
-                self.state.pr_confirm_popup = Some(PrConfirmPopup {
-                    task_id,
-                    pr_title: task_title.clone(),
-                    pr_body: String::new(),
-                    editing_title: true,
-                    generating: true,
+                // No PR yet - show confirmation popup asking if user wants to create PR
+                self.state.review_confirm_popup = Some(ReviewConfirmPopup {
+                    task_id: task.id.clone(),
+                    task_title: task.title.clone(),
                 });
-
-                // Spawn background thread to generate PR description
-                let (tx, rx) = mpsc::channel();
-                self.state.pr_generation_rx = Some(rx);
-
-                let title_for_thread = task_title.clone();
-                let worktree_for_thread = worktree_path.clone();
-                std::thread::spawn(move || {
-                    let (pr_title, pr_body) = generate_pr_description(
-                        &title_for_thread,
-                        worktree_for_thread.as_deref(),
-                        None,
-                    );
-                    let _ = tx.send((pr_title, pr_body));
-                });
-
-                // Don't move yet - wait for popup confirmation
                 return Ok(());
             }
 
